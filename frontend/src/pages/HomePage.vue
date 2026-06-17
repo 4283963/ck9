@@ -12,6 +12,7 @@ const { waferData, loading } = useWaferData()
 const hiddenLayers = ref<number[]>([])
 const highlightLayer = ref<number | null>(null)
 const selectedDefect = ref<Defect | null>(null)
+const exploded = ref(false)
 
 function onToggleLayer(layerId: number) {
   const idx = hiddenLayers.value.indexOf(layerId)
@@ -39,6 +40,10 @@ function onResetLayers() {
   hiddenLayers.value = []
   highlightLayer.value = null
 }
+
+function onToggleExploded() {
+  exploded.value = !exploded.value
+}
 </script>
 
 <template>
@@ -56,9 +61,11 @@ function onResetLayers() {
           :defects="waferData.defects"
           :hiddenLayers="hiddenLayers"
           :highlightLayer="highlightLayer"
+          :exploded="exploded"
           @toggle-layer="onToggleLayer"
           @highlight-layer="onHighlightLayer"
           @reset-layers="onResetLayers"
+          @toggle-exploded="onToggleExploded"
         />
 
         <div class="flex-1 h-full">
@@ -66,6 +73,7 @@ function onResetLayers() {
             :waferData="waferData"
             :hiddenLayers="hiddenLayers"
             :highlightLayer="highlightLayer"
+            :exploded="exploded"
             @defect-click="onDefectClick"
           />
         </div>

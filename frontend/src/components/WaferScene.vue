@@ -12,6 +12,7 @@ const props = defineProps<{
   waferData: WaferData
   hiddenLayers: number[]
   highlightLayer: number | null
+  exploded: boolean
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +40,13 @@ const clock = new THREE.Clock()
 const dummy = new THREE.Object3D()
 const defaultColor = new THREE.Color(0xff3d3d)
 const selectedColor = new THREE.Color(0xff9999)
+
+let layerIdToOffset: Map<number, number> = new Map()
+let layerOriginalY: Map<number, number> = new Map()
+let ringOriginalY: Map<number, number> = new Map()
+let targetExplode = 0
+let currentExplode = 0
+const EXPLODE_UNIT = 3.0
 
 function getLayerVisualHeight(layerId: number): number {
   return layerId === 1 ? 1.5 : 0.4
@@ -87,6 +95,9 @@ function buildWafer() {
   basePositions = []
   selectedInstanceId = -1
   selectionIndicator = null
+  layerIdToOffset = new Map()
+  layerOriginalY = new Map()
+  ringOriginalY = new Map()
 
   const radius = props.waferData.wafer_diameter / 10 / 2
   const sorted = [...props.waferData.layers].sort((a, b) => a.layer_id - b.layer_id)
@@ -105,10 +116,13 @@ function buildWafer() {
       roughness: 0.4,
     })
     const mesh = new THREE.Mesh(geometry, material)
-    mesh.position.y = y + visualHeight / 2
+    const meshY = y + visualHeight / 2
+    mesh.position.y = meshY
     mesh.userData.layerId = layer.layer_id
     scene.add(mesh)
     layerMeshes.push(mesh)
+    layerOriginalY.set(layer.layer_id, meshY)
+    layerIdToOffset.set(layer.layer_id, (layer.layer_id - 1) * EXPLODE_UNIT)
 
     const ringGeometry = new THREE.TorusGeometry(radius, 0.05, 8, 64)
     const ringMaterial = new THREE.MeshStandardMaterial({
@@ -118,10 +132,12 @@ function buildWafer() {
     })
     const ring = new THREE.Mesh(ringGeometry, ringMaterial)
     ring.rotation.x = Math.PI / 2
-    ring.position.y = y + visualHeight
+    const ringY = y + visualHeight
+    ring.position.y = ringY
     ring.userData.layerId = layer.layer_id
     scene.add(ring)
     ringMeshes.push(ring)
+    ringOriginalY.set(layer.layer_id, ringY)
 
     y += visualHeight + 1.2
   }
@@ -176,6 +192,7 @@ function buildWafer() {
 
   updateLayerVisibility()
   updateHighlight()
+  applyExplode(easeOutCubic(currentExplode))
 }
 
 function updateLayerVisibility() {
@@ -188,23 +205,7 @@ function updateLayerVisibility() {
     ring.visible = !hiddenSet.has(ring.userData.layerId)
   }
 
-  if (defectInstances) {
-    for (let i = 0; i < defectList.length; i++) {
-      const isHidden = hiddenSet.has(defectList[i].layer_id)
-      dummy.position.copy(basePositions[i])
-      dummy.scale.setScalar(isHidden ? 0 : 1)
-      dummy.updateMatrix()
-      defectInstances.setMatrixAt(i, dummy.matrix)
-    }
-    defectInstances.instanceMatrix.needsUpdate = true
-  }
-
-  if (selectedInstanceId >= 0 && selectionIndicator) {
-    const defect = defectList[selectedInstanceId]
-    if (defect && hiddenSet.has(defect.layer_id)) {
-      selectionIndicator.visible = false
-    }
-  }
+  applyExplode(easeOutCubic(currentExplode))
 }
 
 function updateHighlight() {
@@ -218,6 +219,50 @@ function updateHighlight() {
       mat.opacity = 0.15
     }
   }
+}
+
+function applyExplode(t: number) {
+  const hiddenSet = new Set(props.hiddenLayers)
+
+  for (const mesh of layerMeshes) {
+    const layerId = mesh.userData.layerId as number
+    const baseY = layerOriginalY.get(layerId) ?? 0
+    const offset = layerIdToOffset.get(layerId) ?? 0
+    mesh.position.y = baseY + offset * t
+  }
+  for (const ring of ringMeshes) {
+    const layerId = ring.userData.layerId as number
+    const baseY = ringOriginalY.get(layerId) ?? 0
+    const offset = layerIdToOffset.get(layerId) ?? 0
+    ring.position.y = baseY + offset * t
+  }
+
+  if (defectInstances) {
+    for (let i = 0; i < defectList.length; i++) {
+      const defect = defectList[i]
+      const layerOffset = layerIdToOffset.get(defect.layer_id) ?? 0
+      const isHidden = hiddenSet.has(defect.layer_id)
+      const base = basePositions[i]
+      dummy.position.set(base.x, base.y + layerOffset * t, base.z)
+      dummy.scale.setScalar(isHidden ? 0 : 1)
+      dummy.updateMatrix()
+      defectInstances.setMatrixAt(i, dummy.matrix)
+    }
+    defectInstances.instanceMatrix.needsUpdate = true
+  }
+
+  if (selectedInstanceId >= 0 && selectionIndicator) {
+    const defect = defectList[selectedInstanceId]
+    if (defect) {
+      const layerOffset = layerIdToOffset.get(defect.layer_id) ?? 0
+      const base = basePositions[selectedInstanceId]
+      selectionIndicator.position.set(base.x, base.y + layerOffset * t, base.z)
+    }
+  }
+}
+
+function easeOutCubic(x: number): number {
+  return 1 - Math.pow(1 - x, 3)
 }
 
 function onPointerDown(event: PointerEvent) {
@@ -264,7 +309,10 @@ function onPointerUp(event: PointerEvent) {
       }
 
       if (selectionIndicator) {
-        selectionIndicator.position.copy(basePositions[instanceId])
+        const layerOffset = layerIdToOffset.get(defect.layer_id) ?? 0
+        const t = easeOutCubic(currentExplode)
+        const base = basePositions[instanceId]
+        selectionIndicator.position.set(base.x, base.y + layerOffset * t, base.z)
         selectionIndicator.visible = true
       }
 
@@ -288,6 +336,16 @@ function onResize() {
 function animate() {
   animationFrameId = requestAnimationFrame(animate)
   const elapsed = clock.getElapsedTime()
+
+  targetExplode = props.exploded ? 1 : 0
+  const delta = targetExplode - currentExplode
+  if (Math.abs(delta) > 1e-4) {
+    currentExplode += delta * Math.min(1, 0.08)
+    if (Math.abs(targetExplode - currentExplode) < 1e-4) {
+      currentExplode = targetExplode
+    }
+    applyExplode(easeOutCubic(currentExplode))
+  }
 
   if (selectionIndicator && selectionIndicator.visible) {
     const pulse = 1.0 + Math.sin(elapsed * 4) * 0.15

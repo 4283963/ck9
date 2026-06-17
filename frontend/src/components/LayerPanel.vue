@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Eye, EyeOff } from 'lucide-vue-next'
+import { Eye, EyeOff, Scissors, Layers } from 'lucide-vue-next'
 import type { WaferLayer, Defect } from '../types/wafer'
 
 const props = defineProps<{
@@ -8,12 +8,14 @@ const props = defineProps<{
   defects: Defect[]
   hiddenLayers: number[]
   highlightLayer: number | null
+  exploded: boolean
 }>()
 
 const emit = defineEmits<{
   'toggle-layer': [layerId: number]
   'highlight-layer': [layerId: number | null]
   'reset-layers': []
+  'toggle-exploded': []
 }>()
 
 const layerDefectCounts = computed(() => {
@@ -67,7 +69,21 @@ const layerDefectCounts = computed(() => {
       </li>
     </ul>
 
-    <div class="px-4 py-3 border-t border-cyan-500/20">
+    <div class="px-4 py-3 border-t border-cyan-500/20 space-y-2">
+      <button
+        class="w-full py-2.5 text-sm font-medium rounded transition-all duration-200 flex items-center justify-center gap-2"
+        :class="[
+          exploded
+            ? 'bg-[#ff3d3d]/80 text-white border border-[#ff3d3d] shadow-lg shadow-[#ff3d3d]/30 hover:bg-[#ff3d3d]'
+            : 'text-[#00e5ff] border border-[#00e5ff]/40 hover:bg-[#00e5ff]/10 shadow-lg shadow-[#00e5ff]/10'
+        ]"
+        @click="emit('toggle-exploded')"
+      >
+        <Layers v-if="exploded" class="w-4 h-4" />
+        <Scissors v-else class="w-4 h-4" />
+        <span>{{ exploded ? '合拢还原' : '一键炸开解体' }}</span>
+      </button>
+
       <button
         class="w-full py-2 text-sm text-cyan-400 border border-cyan-500/30 rounded hover:bg-cyan-500/10 transition-colors"
         @click="emit('reset-layers')"
