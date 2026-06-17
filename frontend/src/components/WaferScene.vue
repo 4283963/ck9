@@ -27,28 +27,33 @@ let controls: OrbitControls | null = null
 let animationFrameId = 0
 let layerMeshes: THREE.Mesh[] = []
 let ringMeshes: THREE.Mesh[] = []
-let defectGroup: THREE.Group | null = null
-let selectedSphere: THREE.Mesh | null = null
+let defectInstances: THREE.InstancedMesh | null = null
+let defectList: Defect[] = []
+let basePositions: THREE.Vector3[] = []
+let selectionIndicator: THREE.Mesh | null = null
+let selectedInstanceId = -1
 let mouseDownPos = { x: 0, y: 0 }
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 const clock = new THREE.Clock()
+const dummy = new THREE.Object3D()
+const defaultColor = new THREE.Color(0xff3d3d)
+const selectedColor = new THREE.Color(0xff9999)
 
 function getLayerVisualHeight(layerId: number): number {
   return layerId === 1 ? 1.5 : 0.4
 }
 
-function getLayerCenterY(layerId: number, layers: WaferLayer[]): number {
+function buildLayerYMap(layers: WaferLayer[]): Map<number, number> {
+  const map = new Map<number, number>()
   const sorted = [...layers].sort((a, b) => a.layer_id - b.layer_id)
   let y = 0
   for (const layer of sorted) {
     const vh = getLayerVisualHeight(layer.layer_id)
-    if (layer.layer_id === layerId) {
-      return y
-    }
+    map.set(layer.layer_id, y + vh / 2)
     y += vh + 1.2
   }
-  return y
+  return map
 }
 
 function buildWafer() {
@@ -64,29 +69,30 @@ function buildWafer() {
     m.geometry.dispose()
     ;(m.material as THREE.Material).dispose()
   })
-  if (defectGroup) {
-    scene.remove(defectGroup)
-    defectGroup.traverse((child) => {
-      if ((child as THREE.Mesh).geometry) {
-        ;(child as THREE.Mesh).geometry.dispose()
-      }
-      if ((child as THREE.Mesh).material) {
-        ;((child as THREE.Mesh).material as THREE.Material).dispose()
-      }
-    })
+  if (defectInstances) {
+    scene.remove(defectInstances)
+    defectInstances.geometry.dispose()
+    ;(defectInstances.material as THREE.Material).dispose()
+  }
+  if (selectionIndicator) {
+    scene.remove(selectionIndicator)
+    selectionIndicator.geometry.dispose()
+    ;(selectionIndicator.material as THREE.Material).dispose()
   }
 
   layerMeshes = []
   ringMeshes = []
-  defectGroup = new THREE.Group()
-  selectedSphere = null
+  defectInstances = null
+  defectList = []
+  basePositions = []
+  selectedInstanceId = -1
+  selectionIndicator = null
 
   const radius = props.waferData.wafer_diameter / 10 / 2
   const sorted = [...props.waferData.layers].sort((a, b) => a.layer_id - b.layer_id)
+  const layerYMap = buildLayerYMap(props.waferData.layers)
 
   let y = 0
-  const layerYMap = new Map<number, number>()
-
   for (const layer of sorted) {
     const visualHeight = getLayerVisualHeight(layer.layer_id)
     const geometry = new THREE.CylinderGeometry(radius, radius, visualHeight, 64)
@@ -103,7 +109,6 @@ function buildWafer() {
     mesh.userData.layerId = layer.layer_id
     scene.add(mesh)
     layerMeshes.push(mesh)
-    layerYMap.set(layer.layer_id, y + visualHeight / 2)
 
     const ringGeometry = new THREE.TorusGeometry(radius, 0.05, 8, 64)
     const ringMaterial = new THREE.MeshStandardMaterial({
@@ -121,42 +126,84 @@ function buildWafer() {
     y += visualHeight + 1.2
   }
 
-  for (const defect of props.waferData.defects) {
-    const sphereGeo = new THREE.SphereGeometry(0.3, 16, 16)
+  const defects = props.waferData.defects
+  const count = defects.length
+
+  if (count > 0) {
+    const sphereGeo = new THREE.SphereGeometry(0.3, 8, 6)
     const sphereMat = new THREE.MeshStandardMaterial({
       color: 0xff3d3d,
       emissive: 0xff0000,
       emissiveIntensity: 0.8,
     })
-    const sphere = new THREE.Mesh(sphereGeo, sphereMat)
-    const defectX = defect.x / 10
-    const defectY = -(defect.y / 10)
-    const layerY = layerYMap.get(defect.layer_id) ?? 0
-    sphere.position.set(defectX, layerY, defectY)
-    sphere.userData.defectId = defect.defect_id
-    sphere.userData.defect = defect
-    defectGroup.add(sphere)
+    defectInstances = new THREE.InstancedMesh(sphereGeo, sphereMat, count)
+
+    for (let i = 0; i < count; i++) {
+      const defect = defects[i]
+      defectList.push(defect)
+
+      const px = defect.x / 10
+      const pz = -(defect.y / 10)
+      const py = layerYMap.get(defect.layer_id) ?? 0
+
+      const pos = new THREE.Vector3(px, py, pz)
+      basePositions.push(pos)
+
+      dummy.position.copy(pos)
+      dummy.scale.set(1, 1, 1)
+      dummy.updateMatrix()
+      defectInstances.setMatrixAt(i, dummy.matrix)
+      defectInstances.setColorAt(i, defaultColor)
+    }
+
+    defectInstances.instanceMatrix.needsUpdate = true
+    if (defectInstances.instanceColor) {
+      defectInstances.instanceColor.needsUpdate = true
+    }
+    scene.add(defectInstances)
   }
 
-  scene.add(defectGroup)
+  const indicatorGeo = new THREE.IcosahedronGeometry(0.55, 1)
+  const indicatorMat = new THREE.MeshBasicMaterial({
+    color: 0x00e5ff,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.7,
+  })
+  selectionIndicator = new THREE.Mesh(indicatorGeo, indicatorMat)
+  selectionIndicator.visible = false
+  scene.add(selectionIndicator)
+
   updateLayerVisibility()
   updateHighlight()
 }
 
 function updateLayerVisibility() {
+  const hiddenSet = new Set(props.hiddenLayers)
+
   for (const mesh of layerMeshes) {
-    mesh.visible = !props.hiddenLayers.includes(mesh.userData.layerId)
+    mesh.visible = !hiddenSet.has(mesh.userData.layerId)
   }
   for (const ring of ringMeshes) {
-    ring.visible = !props.hiddenLayers.includes(ring.userData.layerId)
+    ring.visible = !hiddenSet.has(ring.userData.layerId)
   }
-  if (defectGroup) {
-    defectGroup.traverse((child) => {
-      if ((child as THREE.Mesh).userData.defect) {
-        const defect = child.userData.defect as Defect
-        ;(child as THREE.Mesh).visible = !props.hiddenLayers.includes(defect.layer_id)
-      }
-    })
+
+  if (defectInstances) {
+    for (let i = 0; i < defectList.length; i++) {
+      const isHidden = hiddenSet.has(defectList[i].layer_id)
+      dummy.position.copy(basePositions[i])
+      dummy.scale.setScalar(isHidden ? 0 : 1)
+      dummy.updateMatrix()
+      defectInstances.setMatrixAt(i, dummy.matrix)
+    }
+    defectInstances.instanceMatrix.needsUpdate = true
+  }
+
+  if (selectedInstanceId >= 0 && selectionIndicator) {
+    const defect = defectList[selectedInstanceId]
+    if (defect && hiddenSet.has(defect.layer_id)) {
+      selectionIndicator.visible = false
+    }
   }
 }
 
@@ -191,30 +238,41 @@ function onPointerUp(event: PointerEvent) {
 
   raycaster.setFromCamera(pointer, camera)
 
-  const defectSpheres: THREE.Mesh[] = []
-  if (defectGroup) {
-    defectGroup.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).userData.defectId !== undefined) {
-        defectSpheres.push(child as THREE.Mesh)
-      }
-    })
+  if (selectedInstanceId >= 0 && defectInstances?.instanceColor) {
+    defectInstances.setColorAt(selectedInstanceId, defaultColor)
+    defectInstances.instanceColor.needsUpdate = true
   }
 
-  const intersects = raycaster.intersectObjects(defectSpheres, false)
-  if (intersects.length > 0) {
-    const hit = intersects[0].object as THREE.Mesh
-    const defect = hit.userData.defect as Defect
+  if (defectInstances) {
+    const intersects = raycaster.intersectObject(defectInstances, false)
+    if (intersects.length > 0 && intersects[0].instanceId !== undefined) {
+      const instanceId = intersects[0].instanceId
+      const defect = defectList[instanceId]
 
-    if (selectedSphere && selectedSphere !== hit) {
-      const prevMat = selectedSphere.material as THREE.MeshStandardMaterial
-      prevMat.emissiveIntensity = 0.8
+      const hiddenSet = new Set(props.hiddenLayers)
+      if (hiddenSet.has(defect.layer_id)) {
+        selectedInstanceId = -1
+        if (selectionIndicator) selectionIndicator.visible = false
+        return
+      }
+
+      selectedInstanceId = instanceId
+
+      if (defectInstances.instanceColor) {
+        defectInstances.setColorAt(instanceId, selectedColor)
+        defectInstances.instanceColor.needsUpdate = true
+      }
+
+      if (selectionIndicator) {
+        selectionIndicator.position.copy(basePositions[instanceId])
+        selectionIndicator.visible = true
+      }
+
+      emit('defect-click', defect)
+    } else {
+      selectedInstanceId = -1
+      if (selectionIndicator) selectionIndicator.visible = false
     }
-
-    selectedSphere = hit
-    const mat = hit.material as THREE.MeshStandardMaterial
-    mat.emissiveIntensity = 2.0
-
-    emit('defect-click', defect)
   }
 }
 
@@ -231,21 +289,12 @@ function animate() {
   animationFrameId = requestAnimationFrame(animate)
   const elapsed = clock.getElapsedTime()
 
-  if (defectGroup) {
-    defectGroup.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).userData.defectId !== undefined) {
-        const baseY = (child as THREE.Mesh).userData.baseY ?? (child as THREE.Mesh).position.y
-        if (!(child as THREE.Mesh).userData.baseY) {
-          ;(child as THREE.Mesh).userData.baseY = (child as THREE.Mesh).position.y
-        }
-        ;(child as THREE.Mesh).position.y = baseY + Math.sin(elapsed * 2 + (child as THREE.Mesh).userData.defectId) * 0.1
-      }
-    })
-  }
-
-  if (selectedSphere) {
-    const mat = selectedSphere.material as THREE.MeshStandardMaterial
-    mat.emissiveIntensity = 2.0 + Math.sin(elapsed * 5) * 0.5
+  if (selectionIndicator && selectionIndicator.visible) {
+    const pulse = 1.0 + Math.sin(elapsed * 4) * 0.15
+    selectionIndicator.scale.set(pulse, pulse, pulse)
+    const mat = selectionIndicator.material as THREE.MeshBasicMaterial
+    mat.opacity = 0.4 + Math.sin(elapsed * 4) * 0.3
+    selectionIndicator.rotation.y = elapsed * 0.8
   }
 
   controls?.update()
